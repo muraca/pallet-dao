@@ -1,4 +1,4 @@
-name: Check Set-Up & Build
+name: Test
 
 # Controls when the action will run.
 on:
@@ -13,7 +13,7 @@ on:
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  check:
+  test:
     # The type of runner that the job will run on
     runs-on: ubuntu-22.04
 
@@ -33,11 +33,6 @@ jobs:
       # Rust cache
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check Build
+      - name: Test
         run: |
-          SKIP_WASM_BUILD=1 cargo check --release
-
-      - name: Check Build for Benchmarking
-        run: >
-          pushd node &&
-          cargo check --features=runtime-benchmarks --release
+          cargo test --all-features
