@@ -21,14 +21,14 @@ pub mod pallet {
 	use super::*;
 	use frame_support::{
 		pallet_prelude::*,
+		sp_runtime::{
+			traits::{AccountIdConversion, Hash, Zero},
+			DispatchResult,
+		},
 		traits::{Currency, ExistenceRequirement, NamedReservableCurrency},
 		PalletId,
 	};
 	use frame_system::pallet_prelude::*;
-	use sp_runtime::{
-		traits::{AccountIdConversion, Zero},
-		DispatchResult,
-	};
 
 	#[pallet::pallet]
 	pub struct Pallet<T, I = ()>(PhantomData<(T, I)>);
@@ -93,7 +93,12 @@ pub mod pallet {
 	#[pallet::storage]
 	#[pallet::getter(fn commitments)]
 	pub type Commitments<T: Config<I>, I: 'static = ()> =
-		StorageMap<_, Identity, T::AccountId, (T::Hash, [u8; 16]), OptionQuery>;
+		StorageMap<_, Identity, T::AccountId, (T::Hash, [u8; 16], bool), OptionQuery>;
+
+	/// The current random number, generated from the commitments.
+	#[pallet::storage]
+	#[pallet::getter(fn current_random)]
+	pub type CurrentRandom<T: Config<I>, I: 'static = ()> = StorageValue<_, u128, ValueQuery>;
 
 	// Pallets use events to inform users when important changes are made.
 	// https://docs.substrate.io/main-docs/build/events-errors/
@@ -104,10 +109,9 @@ pub mod pallet {
 		MemberJoined(T::AccountId),
 		/// A member has left the DAO.
 		MemberLeft(T::AccountId),
-		/// A member has committed to a random number.
+		/// A member has committed to a number.
 		Committed(T::AccountId, T::Hash, [u8; 16], BalanceOf<T, I>),
-
-		/// Members can now commit to a random number.
+		/// Members can now commit to a new number.
 		CommitPhaseStarted,
 		/// Members can now reveal their commitments.
 		RevealPhaseStarted,
@@ -132,6 +136,12 @@ pub mod pallet {
 		StakeRequired,
 		/// Failed to stake, probably due to insufficient balance.
 		StakingFailed,
+		/// Reveal is not the current phase.
+		NotRevealPhase,
+		/// Member has not previously committed to a number.
+		NotCommitted,
+		/// The revealed number does not match the committed value.
+		CommitmentMismatch,
 	}
 
 	// Dispatchable functions allows users to interact with the pallet and invoke state changes.
@@ -173,10 +183,9 @@ pub mod pallet {
 		}
 
 		#[pallet::call_index(2)]
-		// TODO handle different weight when stake is zero
 		#[pallet::weight(T::WeightInfo::commit())]
-		/// Commit a random number to be used for randomness generation,
-		/// where `committed_value = BlakeTwo256(number.encode().append(dummy))`.
+		/// Commit a number to be used for randomness generation,
+		/// where `committed_value = BlakeTwo256((number, dummy).encode())`.
 		/// The caller must be a member of the DAO, and the current phase must be `Commit`.
 		/// If `stake` is non-zero, it will be reserved for the duration of the commitment.
 		/// Otherwise, there must be already some stake reserved from previous phases.
@@ -198,8 +207,36 @@ pub mod pallet {
 				T::Currency::reserve_named(&RESERVE_ID, &who, stake)
 					.map_err(|_| <Error<T, I>>::StakingFailed)?;
 			}
-			<Commitments<T, I>>::insert(&who, (committed_value, dummy));
+			<Commitments<T, I>>::insert(&who, (committed_value, dummy, false));
 			Self::deposit_event(<Event<T, I>>::Committed(who, committed_value, dummy, stake));
+
+			Ok(())
+		}
+
+		#[pallet::call_index(3)]
+		#[pallet::weight(T::WeightInfo::reveal())]
+		/// Reveal the number previously committed for randomness generation,
+		/// where `committed_value = BlakeTwo256((number, dummy).encode())`.
+		/// The caller must be a member of the DAO, and the current phase must be `Reveal`.
+		pub fn reveal(origin: OriginFor<T>, number: u128) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			ensure!(<Members<T, I>>::contains_key(&who), <Error<T, I>>::NotAMember);
+			ensure!(<CurrentPhase<T, I>>::get() == Phase::Reveal, <Error<T, I>>::NotCommitPhase);
+
+			<Commitments<T, I>>::try_mutate_exists(&who, |opt| match opt {
+				None => Err(<Error<T, I>>::NotCommitted.into()),
+				Some((committed_value, dummy, revealed)) => {
+					ensure!(
+						T::Hashing::hash_of(&(number, dummy).encode()) == *committed_value,
+						<Error<T, I>>::CommitmentMismatch
+					);
+					if !*revealed {
+						<CurrentRandom<T, I>>::mutate(|random| *random ^= number);
+					}
+					*revealed = true;
+					Ok::<(), DispatchError>(())
+				},
+			})?;
 
 			Ok(())
 		}
@@ -252,14 +289,24 @@ pub mod pallet {
 			} else if m == 11u32.into() {
 				// Start the reveal phase.
 				<CurrentPhase<T, I>>::set(Phase::Reveal);
+				<CurrentRandom<T, I>>::set(0u128);
 				Self::deposit_event(<Event<T, I>>::RevealPhaseStarted);
-				T::DbWeight::get().writes(1_u64)
+				T::DbWeight::get().writes(2_u64)
 			} else if m == 21u32.into() {
 				// Start the cooldown phase.
 				<CurrentPhase<T, I>>::set(Phase::Cooldown);
-				// TODO implement
+				let mut slashed = 0u64;
+				let mut reads = 0u64;
+				<Commitments<T, I>>::iter().for_each(|(who, (_, _, revealed))| {
+					if !revealed {
+						let amount = T::Currency::reserved_balance_named(&RESERVE_ID, &who);
+						T::Currency::slash_reserved_named(&RESERVE_ID, &who, amount / 4u32.into());
+						slashed += 1;
+					}
+					reads += 1;
+				});
 				Self::deposit_event(<Event<T, I>>::CooldownPhaseStarted);
-				Zero::zero()
+				T::DbWeight::get().reads_writes(slashed + reads, slashed + 1)
 			} else {
 				Zero::zero()
 			}

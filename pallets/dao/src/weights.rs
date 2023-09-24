@@ -38,6 +38,7 @@ pub trait WeightInfo {
 	fn join() -> Weight;
 	fn leave() -> Weight;
 	fn commit() -> Weight;
+	fn reveal() -> Weight;
 }
 
 /// Weights for `pallet_dao` using the Substrate node and recommended hardware.
@@ -82,7 +83,7 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 	/// Storage: `System::Account` (r:1 w:1)
 	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(128), added: 2603, mode: `MaxEncodedLen`)
 	/// Storage: `Dao::Commitments` (r:0 w:1)
-	/// Proof: `Dao::Commitments` (`max_values`: None, `max_size`: Some(80), added: 2555, mode: `MaxEncodedLen`)
+	/// Proof: `Dao::Commitments` (`max_values`: None, `max_size`: Some(81), added: 2556, mode: `MaxEncodedLen`)
 	fn commit() -> Weight {
 		// Proof Size summary in bytes:
 		//  Measured:  `240`
@@ -91,6 +92,23 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 		Weight::from_parts(31_000_000, 4714)
 			.saturating_add(T::DbWeight::get().reads(4_u64))
 			.saturating_add(T::DbWeight::get().writes(3_u64))
+	}
+	/// Storage: `Dao::Members` (r:1 w:0)
+	/// Proof: `Dao::Members` (`max_values`: None, `max_size`: Some(32), added: 2507, mode: `MaxEncodedLen`)
+	/// Storage: `Dao::CurrentPhase` (r:1 w:0)
+	/// Proof: `Dao::CurrentPhase` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
+	/// Storage: `Dao::Commitments` (r:1 w:1)
+	/// Proof: `Dao::Commitments` (`max_values`: None, `max_size`: Some(81), added: 2556, mode: `MaxEncodedLen`)
+	/// Storage: `Dao::CurrentRandom` (r:1 w:1)
+	/// Proof: `Dao::CurrentRandom` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
+	fn reveal() -> Weight {
+		// Proof Size summary in bytes:
+		//  Measured:  `279`
+		//  Estimated: `3546`
+		// Minimum execution time: 14_000_000 picoseconds.
+		Weight::from_parts(15_000_000, 3546)
+			.saturating_add(T::DbWeight::get().reads(4_u64))
+			.saturating_add(T::DbWeight::get().writes(2_u64))
 	}
 }
 
@@ -135,7 +153,7 @@ impl WeightInfo for () {
 	/// Storage: `System::Account` (r:1 w:1)
 	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(128), added: 2603, mode: `MaxEncodedLen`)
 	/// Storage: `Dao::Commitments` (r:0 w:1)
-	/// Proof: `Dao::Commitments` (`max_values`: None, `max_size`: Some(80), added: 2555, mode: `MaxEncodedLen`)
+	/// Proof: `Dao::Commitments` (`max_values`: None, `max_size`: Some(81), added: 2556, mode: `MaxEncodedLen`)
 	fn commit() -> Weight {
 		// Proof Size summary in bytes:
 		//  Measured:  `240`
@@ -144,5 +162,22 @@ impl WeightInfo for () {
 		Weight::from_parts(31_000_000, 4714)
 			.saturating_add(RocksDbWeight::get().reads(4_u64))
 			.saturating_add(RocksDbWeight::get().writes(3_u64))
+	}
+	/// Storage: `Dao::Members` (r:1 w:0)
+	/// Proof: `Dao::Members` (`max_values`: None, `max_size`: Some(32), added: 2507, mode: `MaxEncodedLen`)
+	/// Storage: `Dao::CurrentPhase` (r:1 w:0)
+	/// Proof: `Dao::CurrentPhase` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
+	/// Storage: `Dao::Commitments` (r:1 w:1)
+	/// Proof: `Dao::Commitments` (`max_values`: None, `max_size`: Some(81), added: 2556, mode: `MaxEncodedLen`)
+	/// Storage: `Dao::CurrentRandom` (r:1 w:1)
+	/// Proof: `Dao::CurrentRandom` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
+	fn reveal() -> Weight {
+		// Proof Size summary in bytes:
+		//  Measured:  `279`
+		//  Estimated: `3546`
+		// Minimum execution time: 14_000_000 picoseconds.
+		Weight::from_parts(15_000_000, 3546)
+			.saturating_add(RocksDbWeight::get().reads(4_u64))
+			.saturating_add(RocksDbWeight::get().writes(2_u64))
 	}
 }
