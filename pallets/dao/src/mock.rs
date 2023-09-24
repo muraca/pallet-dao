@@ -48,7 +48,7 @@ impl frame_system::Config for Test {
 }
 
 impl pallet_balances::Config for Test {
-	type MaxReserves = ();
+	type MaxReserves = ConstU32<10>;
 	type ReserveIdentifier = [u8; 8];
 	type MaxLocks = ConstU32<10>;
 	type Balance = u64;
@@ -71,6 +71,7 @@ impl pallet_dao::Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type PalletId = DaoPalletId;
+	type MaxMembers = ConstU32<8>;
 	type WeightInfo = ();
 }
 

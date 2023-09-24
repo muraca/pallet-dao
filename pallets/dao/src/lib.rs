@@ -21,16 +21,21 @@ pub mod pallet {
 	use super::*;
 	use frame_support::{
 		pallet_prelude::*,
-		traits::{Currency, ExistenceRequirement, ReservableCurrency},
+		traits::{Currency, ExistenceRequirement, NamedReservableCurrency},
 		PalletId,
 	};
 	use frame_system::pallet_prelude::*;
-	use sp_runtime::traits::AccountIdConversion;
+	use sp_runtime::{
+		traits::{AccountIdConversion, Zero},
+		DispatchResult,
+	};
 
 	#[pallet::pallet]
 	pub struct Pallet<T, I = ()>(PhantomData<(T, I)>);
 
-	/// Configure the pallet by specifying the parameters and types on which it depends.
+	/// The DAO's reserved currency identifier.
+	pub const RESERVE_ID: [u8; 8] = *b"pall/dao";
+
 	#[pallet::config]
 	pub trait Config<I: 'static = ()>: frame_system::Config {
 		/// Because this pallet emits events, it depends on the runtime's definition of an event.
@@ -38,10 +43,13 @@ pub mod pallet {
 			+ IsType<<Self as frame_system::Config>::RuntimeEvent>;
 		/// Currency to be used for this pallet, to pay for membership cost,
 		/// stake for randomness, and reward from randomness usage.
-		type Currency: ReservableCurrency<Self::AccountId>;
+		type Currency: NamedReservableCurrency<Self::AccountId, ReserveIdentifier = [u8; 8]>;
 		/// The Dao's pallet id, used for deriving its sovereign account ID.
 		#[pallet::constant]
 		type PalletId: Get<PalletId>;
+		/// The maximum number of members allowed in the DAO.
+		#[pallet::constant]
+		type MaxMembers: Get<u32>;
 		// Type representing the weight of this pallet
 		type WeightInfo: crate::WeightInfo;
 	}
@@ -49,13 +57,26 @@ pub mod pallet {
 	type BalanceOf<T, I> =
 		<<T as Config<I>>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
+	#[derive(Encode, Decode, PartialEq, Eq, Clone, TypeInfo, MaxEncodedLen)]
+	pub enum Phase {
+		Commit,
+		Reveal,
+		Cooldown,
+	}
+
+	impl Default for Phase {
+		fn default() -> Self {
+			Phase::Cooldown
+		}
+	}
+
 	// The pallet's runtime storage items.
 
 	/// The current members of the DAO.
 	#[pallet::storage]
 	#[pallet::getter(fn members)]
 	pub type Members<T: Config<I>, I: 'static = ()> =
-		StorageMap<_, Identity, T::AccountId, (), OptionQuery>;
+		CountedStorageMap<_, Identity, T::AccountId, (), OptionQuery>;
 
 	/// The current cost of membership.
 	/// Designed to be upgradable by the DAO.
@@ -64,13 +85,34 @@ pub mod pallet {
 	pub type MembershipCost<T: Config<I>, I: 'static = ()> =
 		StorageValue<_, BalanceOf<T, I>, ValueQuery>;
 
+	#[pallet::storage]
+	#[pallet::getter(fn current_phase)]
+	pub type CurrentPhase<T: Config<I>, I: 'static = ()> = StorageValue<_, Phase, ValueQuery>;
+
+	/// The commitments of the members of the DAO.
+	#[pallet::storage]
+	#[pallet::getter(fn commitments)]
+	pub type Commitments<T: Config<I>, I: 'static = ()> =
+		StorageMap<_, Identity, T::AccountId, (T::Hash, [u8; 16]), OptionQuery>;
+
 	// Pallets use events to inform users when important changes are made.
 	// https://docs.substrate.io/main-docs/build/events-errors/
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config<I>, I: 'static = ()> {
 		/// A new member has joined the DAO.
-		NewMember(T::AccountId),
+		MemberJoined(T::AccountId),
+		/// A member has left the DAO.
+		MemberLeft(T::AccountId),
+		/// A member has committed to a random number.
+		Committed(T::AccountId, T::Hash, [u8; 16], BalanceOf<T, I>),
+
+		/// Members can now commit to a random number.
+		CommitPhaseStarted,
+		/// Members can now reveal their commitments.
+		RevealPhaseStarted,
+		/// A new random number has been generated.
+		CooldownPhaseStarted,
 	}
 
 	// Errors inform users that something went wrong.
@@ -78,10 +120,18 @@ pub mod pallet {
 	pub enum Error<T, I = ()> {
 		/// The account is already a member of the DAO.
 		AlreadyMember,
-		/// The subscription cost was not paid, probably due to insufficient balance.
-		SubscriptionCostNotPaid,
+		/// The DAO is already at maximum capacity.
+		MaximumCapacityReached,
+		/// The membership cost was not paid, probably due to insufficient balance.
+		MembershipCostNotPaid,
 		/// The account is not a member of the DAO.
 		NotAMember,
+		/// Commit is not the current phase.
+		NotCommitPhase,
+		/// A member is trying to commit without any stake.
+		StakeRequired,
+		/// Failed to stake, probably due to insufficient balance.
+		StakingFailed,
 	}
 
 	// Dispatchable functions allows users to interact with the pallet and invoke state changes.
@@ -90,31 +140,67 @@ pub mod pallet {
 	#[pallet::call]
 	impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		#[pallet::call_index(0)]
-		#[pallet::weight(T::WeightInfo::subscribe())]
-		/// Subscribe as a new member of the DAO.
-		/// Pay the predetermined cost of membership.
-		pub fn subscribe(origin: OriginFor<T>) -> DispatchResult {
+		#[pallet::weight(T::WeightInfo::join())]
+		/// An account joins to the DAO, paying the cost of membership.
+		pub fn join(origin: OriginFor<T>) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 			ensure!(!<Members<T, I>>::contains_key(&who), <Error<T, I>>::AlreadyMember);
+			ensure!(
+				<Members<T, I>>::count() < T::MaxMembers::get(),
+				<Error<T, I>>::MaximumCapacityReached
+			);
 			T::Currency::transfer(
 				&who,
 				&<Pallet<T, I>>::account_id(),
 				<MembershipCost<T, I>>::get(),
 				ExistenceRequirement::KeepAlive,
 			)
-			.map_err(|_| <Error<T, I>>::SubscriptionCostNotPaid)?;
+			.map_err(|_| <Error<T, I>>::MembershipCostNotPaid)?;
 			<Members<T, I>>::insert(&who, ());
-			Self::deposit_event(<Event<T, I>>::NewMember(who.clone()));
+			Self::deposit_event(<Event<T, I>>::MemberJoined(who.clone()));
 			Ok(())
 		}
 
 		#[pallet::call_index(1)]
-		#[pallet::weight(T::WeightInfo::unsubscribe())]
-		/// Unsubscribe as a member of the DAO.
-		pub fn unsubscribe(origin: OriginFor<T>) -> DispatchResult {
+		#[pallet::weight(T::WeightInfo::leave())]
+		/// A member leaves the DAO.
+		pub fn leave(origin: OriginFor<T>) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 			ensure!(<Members<T, I>>::contains_key(&who), <Error<T, I>>::NotAMember);
 			<Members<T, I>>::remove(&who);
+			Self::deposit_event(<Event<T, I>>::MemberLeft(who.clone()));
+			Ok(())
+		}
+
+		#[pallet::call_index(2)]
+		// TODO handle different weight when stake is zero
+		#[pallet::weight(T::WeightInfo::commit())]
+		/// Commit a random number to be used for randomness generation,
+		/// where `committed_value = BlakeTwo256(number.encode().append(dummy))`.
+		/// The caller must be a member of the DAO, and the current phase must be `Commit`.
+		/// If `stake` is non-zero, it will be reserved for the duration of the commitment.
+		/// Otherwise, there must be already some stake reserved from previous phases.
+		pub fn commit(
+			origin: OriginFor<T>,
+			committed_value: T::Hash,
+			dummy: [u8; 16],
+			stake: BalanceOf<T, I>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			ensure!(<Members<T, I>>::contains_key(&who), <Error<T, I>>::NotAMember);
+			ensure!(<CurrentPhase<T, I>>::get() == Phase::Commit, <Error<T, I>>::NotCommitPhase);
+			if stake.is_zero() {
+				ensure!(
+					!T::Currency::reserved_balance_named(&RESERVE_ID, &who).is_zero(),
+					<Error<T, I>>::StakeRequired
+				);
+			} else {
+				T::Currency::reserve_named(&RESERVE_ID, &who, stake)
+					.map_err(|_| <Error<T, I>>::StakingFailed)?;
+			}
+			<Commitments<T, I>>::insert(&who, (committed_value, dummy));
+			Self::deposit_event(<Event<T, I>>::Committed(who, committed_value, dummy, stake));
+
 			Ok(())
 		}
 	}
@@ -144,6 +230,38 @@ pub mod pallet {
 			let min = T::Currency::minimum_balance();
 			if T::Currency::free_balance(&account_id) < min {
 				let _ = T::Currency::make_free_balance_be(&account_id, min);
+			}
+		}
+	}
+
+	#[pallet::hooks]
+	impl<T: Config<I>, I: 'static> Hooks<BlockNumberFor<T>> for Pallet<T, I> {
+		fn on_initialize(n: BlockNumberFor<T>) -> Weight {
+			// There is a commit phase of 10 blocks, a reveal phase of 10 blocks,
+			// and a cooldown phase of 80 blocks.
+			// We will have a new random number every 100 blocks, usually 10 minutes.
+			// This is designed with the assuption of being an essential operation for the on-chain
+			// applications to work properly, so it is correct to perform it on initialize.
+			let m = n % 100u32.into();
+			if m == 1u32.into() {
+				// Start the commit phase.
+				<CurrentPhase<T, I>>::set(Phase::Commit);
+				let res = <Commitments<T, I>>::clear(T::MaxMembers::get(), None);
+				Self::deposit_event(<Event<T, I>>::CommitPhaseStarted);
+				T::DbWeight::get().reads_writes(res.loops as u64, 1 + res.backend as u64)
+			} else if m == 11u32.into() {
+				// Start the reveal phase.
+				<CurrentPhase<T, I>>::set(Phase::Reveal);
+				Self::deposit_event(<Event<T, I>>::RevealPhaseStarted);
+				T::DbWeight::get().writes(1_u64)
+			} else if m == 21u32.into() {
+				// Start the cooldown phase.
+				<CurrentPhase<T, I>>::set(Phase::Cooldown);
+				// TODO implement
+				Self::deposit_event(<Event<T, I>>::CooldownPhaseStarted);
+				Zero::zero()
+			} else {
+				Zero::zero()
 			}
 		}
 	}

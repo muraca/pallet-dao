@@ -233,7 +233,7 @@ pub const EXISTENTIAL_DEPOSIT: u128 = 500;
 
 impl pallet_balances::Config for Runtime {
 	type MaxLocks = ConstU32<50>;
-	type MaxReserves = ();
+	type MaxReserves = ConstU32<50>;
 	type ReserveIdentifier = [u8; 8];
 	/// The type for recording an account's balance.
 	type Balance = Balance;
@@ -276,6 +276,7 @@ impl pallet_dao::Config<()> for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type PalletId = DaoPalletId;
+	type MaxMembers = ConstU32<64>;
 	type WeightInfo = pallet_dao::weights::SubstrateWeight<Runtime>;
 }
 
